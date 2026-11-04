@@ -184,6 +184,130 @@ volumes:
 ```
 </details>
 
+## День 2
+
+Теперь немного доработаем хороший Docker-файл.
+
+```dockerfile
+FROM python:3.14-slim-bookworm AS builder
+
+[...]
+
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+[...] 
+
+COPY --from=builder /install/ /usr/local/
+```
+
+Теперь есть ```multi-stage build```: зависимости устанавливаются на этапе ```builder```, а в итоговый образ переносятся только они и файлы приложения.
+
+```dockerfile
+RUN addgroup --system app \
+    && adduser --system --ingroup app app 
+
+[...] 
+   
+COPY --chown=app:app . .
+
+USER app 
+```
+
+Добавили пользователя ```app```.
+
+```dockerfile
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5100/health', timeout=2)" || exit 1
+```
+
+Добавили ```HEALTHCHECK```. Docker проверяет эндпоинт ```/health``` каждые 30 секунд.
+
+## День 3
+Итак, теперь у нас есть хороший Докерфайл. Но кто знает, тот ли он, за кого себя выдает? Давайте проверим. 
+Проверим время для начала. Выполним по аналогии с плохим образом докера
+
+```shell
+$goodStart = Get-Date
+docker build -f dockerfile.good_backend -t notes-backend:good .
+$goodFirst = ((Get-Date) - $goodStart).TotalSeconds
+Write-Host "`nGOOD first assembly: $goodFirst sec" 
+```
+![Время - куда лучше](Screens/TestGoodDockerTime.png)
+
+Как видно, теперь сборка образа занимает 74 секунды, что примерно в 4 раза меньше, чем у нас было на плохом докерфайле. Проверим теперь рвзмер. Печатаем:
+
+```shell
+docker images | Select-String "notes-backend"
+```
+![Размер - меньше!](Screens/TestGoodDockerSize.png)
+
+Видно, что размер уменьшился примерно в 7 раз. Проверим пользовательские права образа. В плохом образе каждый шел как рут - посмотрим, как с этой задачей справится хороший докер.
+```shell
+docker compose up -d backend
+docker compose exec backend whoami
+docker compose exec backend id
+```
+![Пользователь - не рут!](Screens/TestGoodDockerWhoAmI.png)
+
+Пользователь - не рут. Изменим одну строчку кода и снова запустим build.
+
+```shell
+Add-Content -Path run.py -Value"`n# cache test" 
+$s = Get-Date
+docker build -f dockerfile.good_backend -t notes-backend:good .
+$goodRe = ((Get-Date) - $s).TotalSeconds
+Write-Host "GOOD rebuild: $goodRe sec"
+```
+![Изменение компилируется за 5 секунд](Screens/TestGoodDockerRebuild.png)
+
+Видно, что теперь после изменения вместо 80 секунд компиляция занимает 5. Проверим, что docker compose up запускает три наших сервиса вместе.
+
+```shell
+docker compose down
+docker compose up -d
+Start-Sleep -Seconds 30
+docker compose ps
+```
+![Три сервиса поднимаются](Screens/TestGoodDockerServ.png)
+
+Проверим общение сервисов между собой. Но сначала применим миграции.
+```shell
+docker compose exec backend flask db upgrade 
+curl http://localhost:5100/api/notes
+curl http://localhost:5173
+docker compose exec frontend sh -c "wget -qO- http://backend:5100/api/notes"
+```
+
+![Результат Curl http://localhost:5100/api/notes ](Screens/TestCurl1.png)
+![Результат Curl http://localhost:5173 ](Screens/TestCurl2.png)
+![Результат exec frontend  ](Screens/TestCurl3.png)
+Все три сервиса общаются между собой: frontend обращается к backend по внутреннему имени http://backend:5100, backend обращается к db по postgresql://db:5432. С хоста доступны localhost:5100 (backend) и localhost:5173 (frontend).
+```shell
+Invoke-RestMethod -Uri "http://localhost:5100/api/notes" `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body '{"title": "Persistent Test", "content": "Should survive"}'
+curl http://localhost:5100/api/notes
+docker compose rm -sf db
+docker ps -a | Select-String "db"
+docker volume ls | Select-String "postgres_data"
+docker compose up -d db
+curl http://localhost:5100/api/notes
+```
+
+![Заметка до удаления тома](Screens/TestBeforeRM.png)
+![Заметка после удаления тома](Screens/TestAfterRM.png)
+Данные PostgreSQL хранятся в именованном томе postgres_data. После docker compose rm -sf db контейнер удалён, но том остался. После docker compose up -d db заметка сохранилась — данные не потерялись.
+
+Проверим сетевую изоляцию.
+```bash
+docker compose exec backend python -c "import socket; s = socket.create_connection(('db', 5432), timeout=3); print('SUCCESS: Backend connected to DB'); s.close()"
+docker compose exec frontend node -e "const net = require('net'); const client = net.createConnection({ host: 'db', port: 5432 }, () => { console.log('FAIL: Frontend CAN connect to DB'); client.end(); }); client.on('error', (err) => { console.log('SUCCESS: Frontend CANNOT connect to DB. Error:', err.code); });"
+```
+![Сетевая изоляция работает](Screens/TestNetIso.png)
+
+Попытка frontend достучаться до db:5432 завершается ошибкой ENOTFOUND (хост не найден), что доказывает сетевую изоляцию.
+
 
 
 
