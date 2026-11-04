@@ -1,0 +1,52 @@
+# Основные отличия от "плохого" докерфайла:
+    # указана конкретная версия питона;
+    # перед установкой зависимостей копируется только соответствующий файд;
+    # убраны apt-get install;
+    # добавлен --no-cache-dir => не будет храниться мусор;
+    # убраны все секреты (вместо этого в compose.yml будут передаваься переменные окружения);
+    # добавлена строка CMD ["gunicorn", "--bind", "0.0.0.0:5100", "run:app"], указывающая, что делать при запуске контейнера.
+    # + создан .dockerignore
+
+FROM python:3.14-slim-bookworm AS builder
+# берем облегченную версию Python 3.14 (занимает меньше места)
+
+WORKDIR /app
+# создается папка арр которой вообще в проекте не было (как корневой) и туда копируется бэк
+
+COPY requirements.txt .
+# копируется только файл requirements.txt
+
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+# --no-cache-dir сообщает, что сохранять кэш в докер-образе не нужно
+# зависимости устанавливаются в отдельную папку /install
+
+# запуск приложения
+FROM python:3.14-slim-bookworm AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+RUN addgroup --system app \
+    && adduser --system --ingroup app app
+# создаем отдельного пользователя для запуска приложения
+
+COPY --from=builder /install/ /usr/local/
+# переносятся только установленные ранее зависимости
+
+COPY --chown=app:app . .
+# копируются файлы приложения с передачей прав пользователю app
+
+USER app
+# запускаем приложение от имени пользователя app
+
+EXPOSE 5100
+# указываем, какой порт использует приложение внутри контейнера
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5100/health', timeout=2)" || exit 1
+# проверяем доступность эндпоинта /health
+
+CMD ["gunicorn", "--bind", "0.0.0.0:5100", "--worker-tmp-dir", "/tmp", "run:app"]
+# приложение запускается через Gunicorn
