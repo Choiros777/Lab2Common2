@@ -308,10 +308,69 @@ docker compose exec frontend node -e "const net = require('net'); const client =
 
 Попытка frontend достучаться до db:5432 завершается ошибкой ENOTFOUND (хост не найден), что доказывает сетевую изоляцию.
 
+## Звездочка
 
+### Самовосстановление 
 
+Внесем изменения в ```compose.yml```. 
 
+Для сервиса ```db```:
 
+```yaml
+healthcheck:
+    test: [ "CMD-SHELL", "pg_isready -U postgres -d notes_service" ]
+    interval: 5s
+    timeout: 3s
+    retries: 10
+    start_period: 10s
+restart: unless-stopped
+```
+Каждые 5 секунд проверяем, готова ли PostgreSQL принимать подключения. Ожидание ответа - не более 3 секунд. Количество неудачных проверок до статуса ```unhealthy``` - 10. Начальный период запуска - 10 секунд.
 
+Для сервиса ```backend```:
 
+```yaml
+depends_on:
+    db:
+        condition: service_healthy
 
+healthcheck:
+    test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5100/health', timeout=2)"
+    interval: 10s
+    timeout: 3s
+    retries: 5
+    start_period: 15s
+
+restart: unless-stopped
+```
+Бэкенд будет запускаться после того, как проверка БД подтвердит её готовность. Его собственный ```healthcheck``` проверяет, отвечает ли маршрут ```/health```.
+
+Для сервиса ```frontend```:
+
+```yaml
+depends_on:
+    backend:
+        condition: service_healthy
+
+healthcheck:
+    test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:5173/').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"
+    interval: 15s
+    timeout: 5s
+    retries: 5
+    start_period: 20s
+
+restart: unless-stopped
+```
+Здесь ```frontend``` ожидает готовности бэкенда, проверяет доступность своей страницы и автоматически перезапускается при завершении контейнера.
+
+![Проверка самовосстановления](Screens/zvezdochka1_proverka.png)
+
+Как можно увидеть на скриншоте, БД восстанавливается после того, как мы ее "погасили".
